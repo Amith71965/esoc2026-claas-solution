@@ -1,145 +1,105 @@
-# ESoC 2026 challenge - CLASS - Embedded AI for Predictive Sensor Systems in Agriculture 4.0
+# ESoC 2026 — CLAAS Challenge: Stone Detection from Harvester Audio
 
-This repository contains trial datasets for the CLAAS "Embedded AI for Predictive Sensor Systems in Agriculture 4.0" challenge at European Summer of Code 2026, and suggested trial tasks.
+This is my solution repo for the CLAAS "Embedded AI for Predictive Sensor Systems in Agriculture 4.0" challenge at European Summer of Code 2026.
 
-For Q&A with experts from CLAAS and mentors from GC.OS, you can use the [GitHub issue tracker](https://github.com/european-summer-of-code/esoc2026-challenge-claas/issues) in the repository (monitored during the ESoC 2026 application period).
+The problem: harvesters ingest stones from the field. The metal detector on the header catches metallic ones, but by then the damage might already be happening. The question is whether the microphone already picked up the impact sound before the metal detector fired — and if so, can we build a model that catches it earlier. Non-metallic stones are the harder case, since there's no sensor for them at all.
 
+---
 
-## Trial datasets
+## What's in this repo
 
-### Description of data
+```
+Notebook_1_Initial_Investigation.ipynb   — first look at the MF4 files, channels, sample rates
+Notebook_2_all_channels.ipynb            — all 5 channels plotted together, episode structure
+Notebook_3_labeling.ipynb                — found two bugs in initial labeling, fixed them
+Notebook_4_stone_audio_fingerprint.ipynb — audio feature analysis around confirmed stone events
+model_training.ipynb                     — ROCKET, TimeSeriesForest, 1D-CNN + ONNX quantization
+APPROACH.md                              — notes on what I tried and what I found
+```
 
-#### Data origin
+The MF4 data files are not included (they're confidential per the challenge terms and also ~250MB). You'll need access to the original challenge repo to get them, then drop them into a `data/` folder at the root.
 
-The data were created by CLAAS in field experiments with agricultural machinery. They were simplified and obfuscated for the purpose of the ESoC 2026 challenge.
+---
 
-The field experiments are described in the following section,
-in a substantially simplified form that corresponds to the simplified data as shared.
+## Setup
 
-The files were shared by CLAAS in early May 2026.
+Tested on macOS with Python 3.14. Should work on 3.10+ without changes.
 
-#### Experimental design
+```bash
+git clone https://github.com/Amith71965/esoc2026-claas-solution.git
+cd esoc2026-claas-solution
 
-In the field experiments, a harvester drives through a field.
-The relevant parts of the harvester for the experiment are:
+# Create the virtual environment
+python3 -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
 
-* the engine of the harvester, which has a certain speed
-* the header at the front of the harvester, which takes up the plants, cuts and chops them.
-  The header can be turned on or off. When turned on, it can additionally be set to
-  different cut lengths (which correlates with uptake speed).
-* two sensors within the header, a microphone and a metal detector.
-  The microphone records an audio signal, and the metal detector records a voltage,
-  which goes up if metal is present in the header.
+# Core dependencies
+pip install asammdf numpy pandas scipy matplotlib jupyter ipykernel scikit-learn librosa
 
-The data was acquired under real world conditions,
-for the purpose of measuring how the sensors behave if stones enter the header.
+# PyTorch (CPU build — no GPU needed)
+pip install torch --index-url https://download.pytorch.org/whl/cpu
 
-This data should be used to develop a model for early detection of stones in the
-header, so the engine can be switched off.
+# ONNX tooling (for the quantization cell in model_training.ipynb)
+pip install onnx onnxruntime onnxscript
 
-The experimental protocol is divided into five runs, with multiple experimental
-episodes.
+# sktime — the challenge suggests using it, install from PyPI like this:
+pip install sktime[classification]
 
-* in each run, the harvester drives through the field in representative
-  real world conditions, across multiple episodes.
-* For each episode, the header is turned on to harvest (plants on the actual field).
-* Within the episode, it is randomized unformily (with an undisclosed probability)
-  whether a metallic stone will be artificially inserted into the header. 
-* If the stone is inserted, it is expected that it will be detected by the metal
-  detector, and also recorded by the microphone. The metal detector has an inbuilt
-  trigger to shut down the header shortly after a spike.
-* It may also happen that a stone already on the field, i.e., one not artificially
-  inserted, is ingested by the harvester. In this case, the header may shut down
-  once the stone blocks the mechanism, or the stone is small and will be mixed
-  into the harvest.
-* Once the header shuts down, or after a certain time elapses (if there was no stone),
-  the episode ends.
+# Register the kernel so Jupyter picks it up
+python -m ipykernel install --user --name=esoc2026-claas --display-name "ESoC 2026 CLAAS"
+```
 
-The experimental question is whether it is possible to detect stones early
-by using the audio signal, and with which accuracy, as measured by:
+Then open any notebook in VS Code or JupyterLab and select the "ESoC 2026 CLAAS" kernel.
 
-* average advance time of detection compared to the metal detector signal (if the stone were metallic)
-* true positive rate
-* false detection rate per time unit in representative real world operation of the header
+One thing worth knowing: sktime's `RocketClassifier` depends on numba, which has a version constraint against Python 3.14 in their pyproject.toml. But if numba is already installed, it works fine — the constraint just means pip won't pull it in automatically. Run `pip install numba` separately if ROCKET fails to import.
 
-For the purpose of the experiment, you can consider:
+---
 
-* the runs to be representative of overall operations
-* the episodes to be representative of episodes within a run
-* the data as a general inspiration for a "real" experiment
-  where you might have more similar data,
-  e.g., 100s of runs and dozens of episodes within a run.
+## Running the notebooks
 
-#### Files
+Run them in order. Each one builds on the previous.
 
-The trial dataset can be found [here](https://github.com/european-summer-of-code/esoc2026-challenge-claas/tree/main/data).
+**Notebook 1** loads the MF4 files and does a basic sanity check — channel names, sample rates, data ranges. Nothing surprising except that the `Status` channel is stored as byte strings (`b'On'`/`b'Off'`), not booleans like the README says. I raised this as an issue with the CLAAS team.
 
-The trial dataset consists of:
+**Notebook 2** plots all 5 channels together for each run. The main thing here is seeing the episode structure — when the header is On vs Off — and getting a feel for when voltage spikes happen relative to the status transitions.
 
-* five `mf4` (MDF4 format) files corresponding to 5 runs of the harvester,
-  each containing potentially multiple episodes
-* five `wav` files for illustration of the audio signal also contained in the `mf4` files.
-  This is illustration in the sense that the `wav` makes it easy to listen to,
-  but the data is already contained int he `mf4` files as one of the channels.
+**Notebook 3** is where I found two problems with the initial labeling logic and fixed them. Worth reading even if you skip straight to modeling, because those bugs directly affect training labels.
 
-The `mf4` files are in standard MDF4 format, each contains five time series channels:
+**Notebook 4** digs into the audio. Takes confirmed stone events (VoltageSignal > 2000 while header is On), extracts 500ms of audio before each spike, and computes four features: short-time RMS, high-frequency energy ratio, kurtosis, and MFCC variance. Peak RMS separates stone from normal at 9x median ratio, which is the most useful single feature.
 
-* `Sensor1`: audio recordings by the microphone in the header, amplitude; float
-* `VehicleSpeed`: speed of the harvester; float
-* `CutLength`: cut length of the header; float, correlates with header uptake speed
-* `VoltageSignal`: metal detector signal, float; spike = detection of metal in the header 
-* `Status`: whether the header is switche on or off, boolean (1=on, 0=off)
+**model_training.ipynb** trains three models on those features, evaluates with leave-one-run-out CV, then exports the CNN to ONNX and quantizes it to INT8. See `APPROACH.md` for honest notes on what the results actually mean.
 
-#### Challenge
+---
 
-An AI model should be able to detect stone uptake in the header early, as measured by
+## Data note
 
-* average advance time of detection compared to the metal detector signal (if the stone were metallic)
-* true positive rate
-* false detection rate per time unit in representative real world operation of the header
+Put the MF4 files in `data/` at the root:
 
-The AI should detect not only metallic stones, but also non-metallic stones,
-assuming that non-metallic stones cause a signal similar to metallic stones except
-for being undetectable via the metal detector.
+```
+data/
+  Messung_2025-05-09_08-59-34.mf4
+  Messung_2025-05-14_16-02-23.mf4
+  Messung_2025-05-20_16-30-26.mf4
+  Messung_2025-10-01_09-42-16.mf4
+  Messung_2025-10-01_17-18-12.mf4
+```
 
-## Trial tasks
+The WAV files are optional — they're just the audio channel exported separately so you can listen to them in Audacity or any audio player. Everything in the notebooks reads from the MF4 files.
 
-### 1. reading the data
+---
 
-Write python code that reads the data into structures that can be consumed by
-common ML / AI packages such as `sktime`, `scikit-learn`, `torch` (at least one).
+## Dependencies summary
 
-Include tests.
+| Package | Why |
+|---------|-----|
+| asammdf | Reading MF4 files |
+| librosa | MFCC extraction, spectrograms |
+| scipy | Kurtosis computation |
+| sktime | ROCKET and TimeSeriesForest classifiers |
+| torch | 1D-CNN training |
+| onnx / onnxruntime / onnxscript | Model export and INT8 quantization |
+| scikit-learn | Oversampling, decision tree fallback |
 
-### 2. building a model
+---
 
-Write some python code which, using any AI model, does the following:
-
-given a live signal, detect stones early.
-
-Showcase your code on some use cases, evaluate your model appropriately on the data provided, and include tests.
-
-Bonus 1: write a generative model to create more similar data. Test your approach on 100s of runs with dozens of episodes each.
-
-Bonus 2: pretend the model needs to fit on an automotive microcontroller with 2 MB RAM,
-inference mode only. Keep all the models you have developed (they can be larger), but
-make a choice what you would put on the microcontroller, and produce corresponding artefacts.
-
-Bonus 3: where components (e.g., data preprocessors, metrics) are not available in `sktime`, open issues of things that you would like to see in `sktime` to tackle ths problem -
-or contribute them to `sktime` as an appropriate object type.
-
-### Bonus: towards a pre-prototype
-
-Using the example data, and possibly code from the above tasks, prepare a showcase how you would approach the general problem.
-
-This should be an indicative pre-prototype only for the purpose of explaining your general approach. Please do not spend too much time on this - especially on graphical user interfaces or productionization.
-
-(you can publish your code under a permissive license if you want)
-
-
-## License
-
-The contents of this repository, including but not restricted to the challenge datasets,
-are not public domain. Please do not distribute further.
-
-By accessing or using any data, documents, code, or other materials contained in this private repository, you acknowledge and agree that all content is confidential and proprietary. The materials are provided solely for the purpose of evaluating applications for European Summer of Code. You may not copy, share, distribute, publish, disclose, or use any content from this repository for any purpose outside of the application or interview process without prior written permission. Unauthorized use or disclosure is strictly prohibited.
+*Part of my application for ESoC 2026. Active discussion with the CLAAS/GC.OS team on the [challenge issue tracker](https://github.com/european-summer-of-code/esoc2026-challenge-claas/issues).*
